@@ -10,7 +10,7 @@ pnpm run dev
 ```
 
 打开终端给出的本地地址。使用 WASD 或方向键移动；角色会自动攻击范围内最近的敌人，攻击距离为基础 2 格加上当前武器距离；E 交互，Esc 暂停。地址：
- https://hh-lose.github.io/trick-maze-2/  
+ https://hh-lose.github.io/trick-maze-2/
 
 ## 构建
 
