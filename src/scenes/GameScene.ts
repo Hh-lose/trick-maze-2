@@ -42,6 +42,9 @@ export class GameScene extends Phaser.Scene {
   private bossWarning = 0;
   private bossTimer = 0;
   private runWeapon: WeaponId = "桃木剑";
+  private navigationDistances = new Map<string, number>();
+  private navigationRefresh = 0;
+  private navigationOrigin = "";
 
   constructor() { super("Game"); }
   init(data: { floor?: number }): void { this.floor = data.floor ?? 1; this.runWeapon = new Rng().pick(Object.keys(WEAPONS) as WeaponId[]); }
@@ -51,7 +54,7 @@ export class GameScene extends Phaser.Scene {
     this.startFloor(this.floor);
   }
   private startFloor(floor: number): void {
-    this.floor = floor; this.children.removeAll(true); this.enemies = []; this.projectiles = []; this.items = []; this.spawned = 0; this.defeated = 0; this.spawnTimer = 800; this.attackCooldown = 0; this.bossTimer = 0; this.bossWarning = 0; this.rng = new Rng(); this.seedText = (this.rng as unknown as { state: number }).state?.toString(16).toUpperCase() ?? Math.floor(Math.random() * 1e8).toString(16).toUpperCase();
+    this.floor = floor; this.children.removeAll(true); this.enemies = []; this.projectiles = []; this.items = []; this.spawned = 0; this.defeated = 0; this.spawnTimer = 800; this.attackCooldown = 0; this.bossTimer = 0; this.bossWarning = 0; this.navigationDistances.clear(); this.navigationRefresh = 0; this.navigationOrigin = ""; this.rng = new Rng(); this.seedText = (this.rng as unknown as { state: number }).state?.toString(16).toUpperCase() ?? Math.floor(Math.random() * 1e8).toString(16).toUpperCase();
     this.map = new MapGenerator().generate(this.rng); this.drawMap();
     const perm = permanentStats(this.save.get().ownedEquipment, this.save.get().equipmentLevel);
     const stats: Stats = { maxHp: 300 + (perm.maxHp ?? 0), attack: 30 + (perm.attack ?? 0), defense: 20 + (perm.defense ?? 0), speed: 96 + (perm.speed ?? 0), crit: .05, attackSpeed: 0 };
@@ -64,7 +67,7 @@ export class GameScene extends Phaser.Scene {
   private createKeyboardHelp(): void { this.add.text(GAME_WIDTH / 2, 810, "WASD / 方向键移动   自动攻击   E 交互   Esc 暂停", { fontFamily: "Microsoft YaHei, Arial", fontSize: "15px", color: "#a8c1b6" }).setOrigin(.5).setDepth(20); }
   update(_time: number, delta: number): void {
     if (this.paused || this.modal) return;
-    const dt = Math.min(delta, 50); this.updatePlayer(dt); this.updateCombat(dt); this.updateEnemies(dt); this.updateProjectiles(dt); this.updateInteraction(dt); this.updateHud();
+    const dt = Math.min(delta, 50); this.updatePlayer(dt); this.updateNavigation(dt); this.updateCombat(dt); this.updateEnemies(dt); this.updateProjectiles(dt); this.updateInteraction(dt); this.updateHud();
     if (this.player.hp <= 0) this.death();
   }
   private updatePlayer(delta: number): void { const move = new Phaser.Math.Vector2(); if (this.keys.left.isDown) move.x -= 1; if (this.keys.right.isDown) move.x += 1; if (this.keys.up.isDown) move.y -= 1; if (this.keys.down.isDown) move.y += 1; if (move.lengthSq() > 1) move.normalize(); if (this.player.stunned > 0) { this.player.stunned -= delta; move.set(0); }
@@ -77,8 +80,32 @@ export class GameScene extends Phaser.Scene {
   private attack(target: Enemy): void { this.attackCooldown = Math.max(250, 750 / (1 + this.player.stats.attackSpeed)); const weapon = WEAPONS[this.player.weapon]; const range = this.effectiveAttackRange() * TILE; const crit = this.rng.next() < this.player.stats.crit; const hit: Enemy[] = []; for (const enemy of this.enemies) { const distance = enemy.position.distance(this.player.position); const direction = enemy.position.clone().subtract(this.player.position).normalize(); const dot = direction.dot(this.player.aim); const circle = this.player.weapon === "八卦盘" || this.player.weapon === "拂尘"; const line = this.player.weapon === "红葫芦"; if (distance <= range && (circle || (line ? dot > .86 : dot > .35))) hit.push(enemy); }
     if (this.player.weapon === "雷符") { const center = target.position; this.enemies.forEach((enemy) => { if (enemy.position.distance(center) < 1.5 * TILE) hit.push(enemy); }); }
     const flash = this.add.graphics().setDepth(15); flash.lineStyle(5, 0xb8f7ec, .85); flash.lineBetween(this.player.position.x, this.player.position.y, this.player.position.x + this.player.aim.x * range, this.player.position.y + this.player.aim.y * range); this.tweens.add({ targets: flash, alpha: 0, duration: 120, onComplete: () => flash.destroy() }); [...new Set(hit)].forEach((enemy) => { const amount = damage(this.player.stats.attack, 0, weapon.multiplier, crit); this.damageEnemy(enemy, amount, crit, this.player.weapon === "红葫芦"); }); }
+  private updateNavigation(delta: number): void {
+    this.navigationRefresh -= delta;
+    const origin = this.worldTile(this.player.position), originKey = this.tileKey(origin.x, origin.y);
+    if (this.navigationRefresh > 0 && this.navigationOrigin === originKey) return;
+    this.navigationRefresh = 180; this.navigationOrigin = originKey; this.navigationDistances.clear();
+    if (this.map.walls[origin.y]?.[origin.x]) return;
+    const queue = [origin]; this.navigationDistances.set(originKey, 0);
+    for (let index = 0; index < queue.length; index++) {
+      const tile = queue[index], distance = this.navigationDistances.get(this.tileKey(tile.x, tile.y))!;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = tile.x + dx, y = tile.y + dy, key = this.tileKey(x, y);
+        if (!this.map.walls[y]?.[x] && !this.navigationDistances.has(key)) { this.navigationDistances.set(key, distance + 1); queue.push(new Phaser.Math.Vector2(x, y)); }
+      }
+    }
+  }
+  private navigationDirection(position: Phaser.Math.Vector2): Phaser.Math.Vector2 {
+    const current = this.worldTile(position); let best = current, bestDistance = this.navigationDistances.get(this.tileKey(current.x, current.y)) ?? Infinity;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const tile = new Phaser.Math.Vector2(current.x + dx, current.y + dy), distance = this.navigationDistances.get(this.tileKey(tile.x, tile.y));
+      if (distance !== undefined && distance < bestDistance) { best = tile; bestDistance = distance; }
+    }
+    const target = best.equals(current) ? this.player.position : this.tilePosition(best);
+    return target.clone().subtract(position).normalize();
+  }
   private updateEnemies(delta: number): void { this.spawnTimer -= delta; if (this.spawned < this.target && this.spawnTimer <= 0 && this.enemies.length < 55) { this.spawnWave(); this.spawnTimer = 3000; } for (const enemy of this.enemies) { if (!enemy.alive) continue; enemy.cooldown -= delta; enemy.hitFlash = Math.max(0, enemy.hitFlash - delta); enemy.burn = Math.max(0, enemy.burn - delta); enemy.burnTick += delta; if (enemy.burn > 0 && enemy.burnTick > 1000) { enemy.burnTick = 0; this.damageEnemy(enemy, Math.max(1, Math.floor(enemy.hpMax * .01)), false, false); }
-      const direction = this.player.position.clone().subtract(enemy.position); const dist = direction.length(); if (dist > (enemy.definition.ranged ? 5 : 1) * TILE) { direction.normalize(); const speed = enemy.boss ? 64 : (enemy.kind === "狼兵" && Math.floor(this.time.now / 5000) % 2 === 0 ? 96 : 48); const next = enemy.position.clone().add(direction.scale(speed * delta / 1000)); if (!this.blocked(next)) enemy.position.copy(next); } else if (enemy.cooldown <= 0) { enemy.cooldown = enemy.definition.ranged ? 3000 : 1500; if (enemy.definition.ranged) this.shootEnemy(enemy); else this.hitPlayer(damage(enemy.attack, this.player.stats.defense)); }
+      const enemyTile = this.worldTile(enemy.position); const pathDistance = this.navigationDistances.get(this.tileKey(enemyTile.x, enemyTile.y)) ?? Infinity; const attackRange = enemy.definition.ranged ? 5 : 1; if (pathDistance > attackRange) { const direction = this.navigationDirection(enemy.position); const speed = enemy.boss ? 64 : (enemy.kind === "狼兵" && Math.floor(this.time.now / 5000) % 2 === 0 ? 96 : 48); const next = enemy.position.clone().add(direction.scale(speed * delta / 1000)); if (!this.blocked(next)) enemy.position.copy(next); } else if (enemy.cooldown <= 0) { enemy.cooldown = enemy.definition.ranged ? 3000 : 1500; if (enemy.definition.ranged) this.shootEnemy(enemy); else this.hitPlayer(damage(enemy.attack, this.player.stats.defense)); }
       enemy.draw(); }
     this.enemies = this.enemies.filter((enemy) => enemy.alive);
     const boss = this.enemies.find((enemy) => enemy.boss); if (boss) { this.bossTimer += delta; if (this.bossTimer > 13800 && this.bossWarning === 0) { this.bossWarning = 1200; this.toast("迷魂震荡！", 1200); } if (this.bossWarning > 0) { this.bossWarning -= delta; if (this.bossWarning <= 0) { this.player.stunned = 1000; this.hitPlayer(Math.round(this.player.stats.maxHp * .02), true); this.bossTimer = 0; } } }
@@ -107,6 +134,8 @@ export class GameScene extends Phaser.Scene {
   private toast(text: string, duration: number): void { if (!this.banner) return; this.banner.setText(text).setVisible(true); this.time.delayedCall(duration, () => this.banner?.setVisible(false)); }
   private floatText(position: Phaser.Math.Vector2, text: string, color: string): void { const label = this.add.text(position.x, position.y - 16, text, { fontSize: "15px", color, fontStyle: "bold" }).setOrigin(.5).setDepth(40); this.tweens.add({ targets: label, y: label.y - 24, alpha: 0, duration: 600, onComplete: () => label.destroy() }); }
   private tilePosition(tile: Phaser.Math.Vector2): Phaser.Math.Vector2 { const ox = Math.floor((GAME_WIDTH - this.map.width * TILE) / 2); return new Phaser.Math.Vector2(ox + tile.x * TILE + TILE / 2, MAP_Y + tile.y * TILE + TILE / 2); }
-  private blocked(pos: Phaser.Math.Vector2): boolean { const ox = Math.floor((GAME_WIDTH - this.map.width * TILE) / 2); const x = Math.floor((pos.x - ox) / TILE), y = Math.floor((pos.y - MAP_Y) / TILE); return this.map.walls[y]?.[x] ?? true; }
+  private tileKey(x: number, y: number): string { return `${x},${y}`; }
+  private worldTile(pos: Phaser.Math.Vector2): Phaser.Math.Vector2 { const ox = Math.floor((GAME_WIDTH - this.map.width * TILE) / 2); return new Phaser.Math.Vector2(Math.floor((pos.x - ox) / TILE), Math.floor((pos.y - MAP_Y) / TILE)); }
+  private blocked(pos: Phaser.Math.Vector2): boolean { const tile = this.worldTile(pos); return this.map.walls[tile.y]?.[tile.x] ?? true; }
   private safeTile(distance: number): Phaser.Math.Vector2 { let tile = this.rng.pick(this.map.walkable); for (let tries = 0; tries < 30 && this.tilePosition(tile).distance(this.player.position) < distance * TILE; tries++) tile = this.rng.pick(this.map.walkable); return this.tilePosition(tile); }
 }
